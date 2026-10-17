@@ -1,0 +1,71 @@
+name: Release
+
+on:
+    push:
+        tags:
+            - "v*.*.*"
+
+permissions:
+    contents: write
+
+jobs:
+    ci:
+        uses: ./.github/workflows/ci.yml
+
+    build-and-release:
+        needs: ci
+        runs-on: macos-latest
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v4
+
+            - name: Verify release notes file exists
+              id: release_check
+              run: |
+                  NOTE_FILE="releases/${GITHUB_REF_NAME}.md"
+                  if [ ! -f "$NOTE_FILE" ]; then
+                    echo "::error::Release note file '$NOTE_FILE' does not exist for tag '$GITHUB_REF_NAME'."
+                    exit 1
+                  fi
+                  echo "note_file=${NOTE_FILE}" >> "$GITHUB_OUTPUT"
+
+            - name: Install Rust toolchain (aarch64-apple-darwin)
+              uses: dtolnay/rust-toolchain@stable
+              with:
+                  targets: aarch64-apple-darwin
+
+            - name: Build release binary (Apple Silicon)
+              run: cargo build --release --target aarch64-apple-darwin
+
+            - name: Package archive and generate SHA-256
+              id: package
+              run: |
+                  cd target/aarch64-apple-darwin/release
+                  tar -czf m2us.tar.gz m2us
+                  shasum -a 256 m2us.tar.gz > m2us.tar.gz.sha256
+                  HASH=$(awk '{print $1}' m2us.tar.gz.sha256)
+                  echo "sha256=${HASH}" >> "$GITHUB_OUTPUT"
+
+            - name: Prepare release body with SHA-256 hash
+              env:
+                  NOTE_FILE: ${{ steps.release_check.outputs.note_file }}
+                  SHA256_HASH: ${{ steps.package.outputs.sha256 }}
+              run: |
+                  cp "$NOTE_FILE" "$RUNNER_TEMP/release_body.md"
+                  {
+                    echo ""
+                    echo "### Checksum (SHA-256)"
+                    echo ""
+                    echo '```text'
+                    echo "${SHA256_HASH}  m2us.tar.gz"
+                    echo '```'
+                  } >> "$RUNNER_TEMP/release_body.md"
+
+            - name: Create GitHub Release
+              uses: softprops/action-gh-release@v2
+              with:
+                  body_path: ${{ runner.temp }}/release_body.md
+                  files: |
+                      target/aarch64-apple-darwin/release/m2us.tar.gz
+                      target/aarch64-apple-darwin/release/m2us.tar.gz.sha256
+                  fail_on_unmatched_files: true

@@ -1,40 +1,31 @@
 name: CI
 
 on:
-  push:
-    branches: ["main"]
-  pull_request:
+    push:
+        branches: ["main"]
+    workflow_call:
 
 jobs:
-  test-and-build:
-    runs-on: macos-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    check-and-test:
+        runs-on: macos-latest
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v4
 
-      - name: Install Rust toolchain (aarch64-apple-darwin)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin
-          components: rustfmt, clippy
+            - name: Install Rust toolchain (aarch64-apple-darwin)
+              uses: dtolnay/rust-toolchain@stable
+              with:
+                  targets: aarch64-apple-darwin
+                  components: rustfmt, clippy
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+            - name: Check formatting
+              run: cargo fmt --all -- --check
 
-      - name: Run Clippy
-        run: cargo clippy --all-targets --target aarch64-apple-darwin -- -D warnings
+            - name: Run Clippy
+              run: cargo clippy --all-targets --target aarch64-apple-darwin -- -D warnings
 
-      - name: Run unit tests
-        run: cargo test --target aarch64-apple-darwin
+            - name: Run unit tests
+              run: cargo test --target aarch64-apple-darwin
 
-      - name: Build release binary (Apple Silicon)
-        run: cargo build --release --target aarch64-apple-darwin
-
-      - name: Check binary size
-        run: ls -lh target/aarch64-apple-darwin/release/m2us
-
-      - name: Upload release binary artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: m2us-aarch64-apple-darwin
-          path: target/aarch64-apple-darwin/release/m2us
+            - name: Build release binary (Apple Silicon)
+              run: cargo build --release --target aarch64-apple-darwin
