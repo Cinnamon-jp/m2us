@@ -3,12 +3,19 @@ pub const KEY_LEFT_COMMAND: u16 = 0x37; // 55: kVK_Command
 pub const KEY_RIGHT_COMMAND: u16 = 0x36; // 54: kVK_RightCommand
 pub const KEY_JIS_EISU: u16 = 0x66; // 102: kVK_JIS_Eisu (英数)
 pub const KEY_JIS_KANA: u16 = 0x68; // 104: kVK_JIS_Kana (かな)
+pub const KEY_ESCAPE: u16 = 0x35; // 53: kVK_Escape (Esc)
+pub const KEY_CAPS_PROXY: u16 = 0x4F; // 79: kVK_F18 (hidutilにより物理CapsLockからリマップされたキー)
+
+/// CapsLock長押し判定しきい値（秒）
+pub const CAPS_HOLD_THRESHOLD_SECS: f64 = 0.25; // 250ms
 
 /// CGEventFlags bitmasks
+pub const FLAG_MASK_ALPHA_SHIFT: u64 = 0x0001_0000; // kCGEventFlagMaskAlphaShift (CapsLock ON状態)
 pub const FLAG_MASK_COMMAND: u64 = 0x0010_0000; // kCGEventFlagMaskCommand
-/// Command以外の修飾キー（Shift, Control, Option, CapsLock）のマスク
-/// AlphaShift/Caps(0x0001_0000) | Shift(0x0002_0000) | Control(0x0004_0000) | Alternate/Option(0x0008_0000)
-pub const FLAG_MASK_OTHER_MODIFIERS: u64 = 0x0001_0000 | 0x0002_0000 | 0x0004_0000 | 0x0008_0000;
+/// Command以外の押下修飾キー（Shift, Control, Option）のマスク
+/// ※ AlphaShift(0x0001_0000)はCapsLockロック中もCommandタップを有効にするため除外
+/// Shift(0x0002_0000) | Control(0x0004_0000) | Alternate/Option(0x0008_0000)
+pub const FLAG_MASK_OTHER_MODIFIERS: u64 = 0x0002_0000 | 0x0004_0000 | 0x0008_0000;
 
 /// Device-dependent Command key flags (IOKit IOLLEvent.h NX_DEVICELCMDKEYMASK / NX_DEVICERCMDKEYMASK)
 /// 左右Commandの同時押しを厳密に区別するために利用可能（下位ビット）
@@ -22,6 +29,7 @@ pub enum State {
     Idle = 0,
     PendingLeftCmd = 1,
     PendingRightCmd = 2,
+    PendingCaps = 3,
 }
 
 impl State {
@@ -30,15 +38,49 @@ impl State {
         match val {
             1 => State::PendingLeftCmd,
             2 => State::PendingRightCmd,
+            3 => State::PendingCaps,
             _ => State::Idle,
         }
     }
 
     pub fn process_event(self, event: InputEvent) -> (Self, Action) {
         match event {
-            InputEvent::OtherInput | InputEvent::Reset => (State::Idle, Action::None),
+            InputEvent::OtherInput | InputEvent::Reset => {
+                if self == State::PendingCaps {
+                    (State::Idle, Action::CancelCapsTimer)
+                } else {
+                    (State::Idle, Action::None)
+                }
+            }
+            InputEvent::CapsDown { is_repeat } => {
+                if is_repeat {
+                    (self, Action::None)
+                } else if self == State::Idle {
+                    (State::PendingCaps, Action::StartCapsTimer)
+                } else {
+                    (State::Idle, Action::CancelCapsTimer)
+                }
+            }
+            InputEvent::CapsUp => {
+                if self == State::PendingCaps {
+                    (State::Idle, Action::SendKey(KEY_ESCAPE))
+                } else {
+                    (State::Idle, Action::None)
+                }
+            }
+            InputEvent::CapsHoldTimeout => {
+                if self == State::PendingCaps {
+                    (State::Idle, Action::ToggleCapsLock)
+                } else {
+                    (self, Action::None)
+                }
+            }
             InputEvent::FlagsChanged { keycode, flags } => {
-                // 他の修飾キー（Shift, Control, Option, CapsLock）が押されている場合はキャンセル
+                if self == State::PendingCaps {
+                    return (State::Idle, Action::CancelCapsTimer);
+                }
+
+                // 他の修飾キー（Shift, Control, Option）が押されている場合はキャンセル
                 if (flags & FLAG_MASK_OTHER_MODIFIERS) != 0 {
                     return (State::Idle, Action::None);
                 }
@@ -98,6 +140,12 @@ impl State {
 pub enum InputEvent {
     /// kCGEventFlagsChanged: keycode と イベント発生後の flags
     FlagsChanged { keycode: u16, flags: u64 },
+    /// CapsLock (KEY_CAPS_PROXY) 押下（is_repeat: キーリピートかどうか）
+    CapsDown { is_repeat: bool },
+    /// CapsLock (KEY_CAPS_PROXY) 解放
+    CapsUp,
+    /// CapsLock 長押しタイマー（250ms）満了
+    CapsHoldTimeout,
     /// 通常キー押下、マウスクリック、スクロールなど空打ちをキャンセルすべきイベント
     OtherInput,
     /// タップタイムアウト等によるリセット
@@ -107,7 +155,10 @@ pub enum InputEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     None,
-    SendKey(u16), // KEY_JIS_EISU または KEY_JIS_KANA
+    SendKey(u16), // KEY_JIS_EISU, KEY_JIS_KANA, または KEY_ESCAPE
+    StartCapsTimer,
+    CancelCapsTimer,
+    ToggleCapsLock,
 }
 
 #[cfg(test)]
@@ -119,6 +170,7 @@ mod tests {
         assert_eq!(State::from_u8(0), State::Idle);
         assert_eq!(State::from_u8(1), State::PendingLeftCmd);
         assert_eq!(State::from_u8(2), State::PendingRightCmd);
+        assert_eq!(State::from_u8(3), State::PendingCaps);
         assert_eq!(State::from_u8(99), State::Idle);
     }
 
@@ -341,5 +393,118 @@ mod tests {
         let (s, act) = state.process_event(InputEvent::Reset);
         assert_eq!(s, State::Idle);
         assert_eq!(act, Action::None);
+    }
+
+    #[test]
+    fn test_caps_tap_emits_escape() {
+        assert_eq!(KEY_CAPS_PROXY, 0x4F);
+        assert!((CAPS_HOLD_THRESHOLD_SECS - 0.25).abs() < f64::EPSILON);
+
+        let state = State::Idle;
+
+        // CapsLock押下（初回）
+        let (s, act) = state.process_event(InputEvent::CapsDown { is_repeat: false });
+        assert_eq!(s, State::PendingCaps);
+        assert_eq!(act, Action::StartCapsTimer);
+
+        // 250ms未満でCapsLock解放 -> Esc送出
+        let (s, act) = s.process_event(InputEvent::CapsUp);
+        assert_eq!(s, State::Idle);
+        assert_eq!(act, Action::SendKey(KEY_ESCAPE));
+    }
+
+    #[test]
+    fn test_caps_hold_timeout_toggles_capslock() {
+        let state = State::Idle;
+
+        // CapsLock押下
+        let (s, act) = state.process_event(InputEvent::CapsDown { is_repeat: false });
+        assert_eq!(s, State::PendingCaps);
+        assert_eq!(act, Action::StartCapsTimer);
+
+        // 250ms経過（タイマー満了） -> CapsLockトグル発火
+        let (s, act) = s.process_event(InputEvent::CapsHoldTimeout);
+        assert_eq!(s, State::Idle);
+        assert_eq!(act, Action::ToggleCapsLock);
+
+        // その後キーリピートが来ても無視
+        let (s, act) = s.process_event(InputEvent::CapsDown { is_repeat: true });
+        assert_eq!(s, State::Idle);
+        assert_eq!(act, Action::None);
+
+        // その後キーを離しても何も発火しない
+        let (s, act) = s.process_event(InputEvent::CapsUp);
+        assert_eq!(s, State::Idle);
+        assert_eq!(act, Action::None);
+    }
+
+    #[test]
+    fn test_caps_autorepeat_ignored_while_pending() {
+        let state = State::Idle;
+
+        let (s, act) = state.process_event(InputEvent::CapsDown { is_repeat: false });
+        assert_eq!(s, State::PendingCaps);
+        assert_eq!(act, Action::StartCapsTimer);
+
+        // 押下中のキーリピートはPendingCapsを維持し、タイマーを再起動しない
+        let (s, act) = s.process_event(InputEvent::CapsDown { is_repeat: true });
+        assert_eq!(s, State::PendingCaps);
+        assert_eq!(act, Action::None);
+    }
+
+    #[test]
+    fn test_caps_cancelled_by_other_input() {
+        let state = State::Idle;
+
+        let (s, act) = state.process_event(InputEvent::CapsDown { is_repeat: false });
+        assert_eq!(s, State::PendingCaps);
+        assert_eq!(act, Action::StartCapsTimer);
+
+        // 押下中に他のキーやマウス操作が発生 -> タイマーキャンセル & Idleへ
+        let (s, act) = s.process_event(InputEvent::OtherInput);
+        assert_eq!(s, State::Idle);
+        assert_eq!(act, Action::CancelCapsTimer);
+
+        // その後CapsLockを離してもEscは発火しない
+        let (s, act) = s.process_event(InputEvent::CapsUp);
+        assert_eq!(s, State::Idle);
+        assert_eq!(act, Action::None);
+    }
+
+    #[test]
+    fn test_caps_cancelled_by_modifier_flags_changed() {
+        let state = State::Idle;
+
+        let (s, _) = state.process_event(InputEvent::CapsDown { is_repeat: false });
+        assert_eq!(s, State::PendingCaps);
+
+        // CapsLock押下中にCommandキーが押された場合
+        let (s, act) = s.process_event(InputEvent::FlagsChanged {
+            keycode: KEY_LEFT_COMMAND,
+            flags: FLAG_MASK_COMMAND | FLAG_DEV_LEFT_CMD,
+        });
+        assert_eq!(s, State::Idle);
+        assert_eq!(act, Action::CancelCapsTimer);
+    }
+
+    #[test]
+    fn test_command_tap_works_when_capslock_is_locked_on() {
+        let state = State::Idle;
+
+        // CapsLockがON（FLAG_MASK_ALPHA_SHIFT）の状態で左Command押下
+        let (s, act) = state.process_event(InputEvent::FlagsChanged {
+            keycode: KEY_LEFT_COMMAND,
+            flags: FLAG_MASK_ALPHA_SHIFT | FLAG_MASK_COMMAND | FLAG_DEV_LEFT_CMD,
+        });
+        assert_eq!(s, State::PendingLeftCmd);
+        assert_eq!(act, Action::None);
+
+        // 左Command解放（FLAG_MASK_ALPHA_SHIFTは維持） -> 英数が発火すること
+        let (s, act) = s.process_event(InputEvent::FlagsChanged {
+            keycode: KEY_LEFT_COMMAND,
+            flags: FLAG_MASK_ALPHA_SHIFT,
+        });
+        assert_eq!(s, State::Idle);
+        assert_eq!(act, Action::SendKey(KEY_JIS_EISU));
     }
 }
