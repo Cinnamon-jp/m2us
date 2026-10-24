@@ -1,3 +1,5 @@
+pub mod hidmap;
+pub mod lock;
 pub mod state;
 
 #[cfg(target_os = "macos")]

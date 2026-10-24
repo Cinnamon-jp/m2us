@@ -2,7 +2,10 @@ use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, Ordering};
 use std::process::Command;
+use std::sync::OnceLock;
 
+use crate::hidmap::{self, Mapping};
+use crate::lock;
 use crate::state::{Action, CAPS_HOLD_THRESHOLD_SECS, InputEvent, KEY_CAPS_PROXY, State};
 
 type CFMachPortRef = *mut c_void;
@@ -55,6 +58,7 @@ const K_IO_HID_CAPS_LOCK_STATE: i32 = 1;
 const K_IO_HID_SYSTEM_CLASS: &core::ffi::CStr = c"IOHIDSystem";
 
 // POSIX Signals
+const SIGHUP: c_int = 1;
 const SIGINT: c_int = 2;
 const SIGTERM: c_int = 15;
 
@@ -142,6 +146,9 @@ static RUN_LOOP: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static CAPS_TIMER: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static HID_CONNECT: AtomicU32 = AtomicU32::new(0);
 static CAPS_LOCK_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// 終了時（正常終了・panic）に `hidutil` へ書き戻す元の `UserKeyMapping`（JSON）。
+/// リマップを有効化した時点でのみ設定される。
+static RESTORE_PAYLOAD: OnceLock<String> = OnceLock::new();
 
 unsafe fn send_key(keycode: CGKeyCode) {
     let down = unsafe { CGEventCreateKeyboardEvent(ptr::null_mut(), keycode, true) };
@@ -313,15 +320,48 @@ unsafe extern "C" fn event_tap_callback(
     event
 }
 
-fn configure_hidutil(enable: bool) {
-    let payload = if enable {
-        r#"{"UserKeyMapping":[{"HIDKeyboardModifierMappingSrc":0x700000039,"HIDKeyboardModifierMappingDst":0x70000006D}],"CapsLockDelayOverride":0}"#
-    } else {
-        r#"{"UserKeyMapping":[]}"#
-    };
-    let _ = Command::new("/usr/bin/hidutil")
+const HIDUTIL_PATH: &str = "/usr/bin/hidutil";
+
+fn hidutil_set(payload: &str) {
+    let _ = Command::new(HIDUTIL_PATH)
         .args(["property", "--set", payload])
         .status();
+}
+
+/// 現在の `UserKeyMapping` を取得する。取得・解釈に失敗した場合は `None`。
+fn read_user_key_mapping() -> Option<Vec<Mapping>> {
+    let out = Command::new(HIDUTIL_PATH)
+        .args(["property", "--get", "UserKeyMapping"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    hidmap::parse_user_key_mapping(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// 既存のリマップを保持したまま CapsLock→F18 を追加する。
+/// 前回異常終了して残った自前エントリは「元の設定」から除外されるため、
+/// 再起動するだけで正常な状態に戻る。
+fn enable_hidutil() {
+    let original = match read_user_key_mapping() {
+        Some(current) => hidmap::without_own(&current),
+        None => {
+            eprintln!(
+                "m2us warning: could not read the current UserKeyMapping; existing key remaps may be lost."
+            );
+            Vec::new()
+        }
+    };
+    let _ = RESTORE_PAYLOAD.set(hidmap::set_payload(&original, false));
+    hidutil_set(&hidmap::set_payload(&hidmap::with_own(&original), true));
+}
+
+/// 起動前の `UserKeyMapping` を書き戻す（有効化していない場合は何もしない）。
+fn restore_hidutil() {
+    if let Some(payload) = RESTORE_PAYLOAD.get() {
+        hidutil_set(payload);
+    }
 }
 
 unsafe fn open_iohid_connect() -> u32 {
@@ -354,6 +394,9 @@ unsafe extern "C" fn handle_signal(_sig: c_int) {
 }
 
 pub fn run() -> Result<(), &'static str> {
+    // 他のインスタンスが動作中の場合は、何も変更せずに終了する。
+    let _instance_lock = lock::acquire(&lock::default_path())?;
+
     unsafe {
         pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
     }
@@ -407,11 +450,19 @@ pub fn run() -> Result<(), &'static str> {
         return Err("Failed to create CFRunLoopSource.");
     }
 
-    configure_hidutil(true);
+    enable_hidutil();
+
+    // panic = "abort" でもリマップが残らないよう、abort前に元の設定へ戻す。
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_hidutil();
+        default_hook(info);
+    }));
 
     unsafe {
         let run_loop = CFRunLoopGetCurrent();
         RUN_LOOP.store(run_loop, Ordering::Relaxed);
+        signal(SIGHUP, handle_signal);
         signal(SIGINT, handle_signal);
         signal(SIGTERM, handle_signal);
 
@@ -427,7 +478,7 @@ pub fn run() -> Result<(), &'static str> {
         }
     }
 
-    configure_hidutil(false);
+    restore_hidutil();
 
     Ok(())
 }

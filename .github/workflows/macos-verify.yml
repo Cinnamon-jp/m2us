@@ -1,0 +1,32 @@
+name: macOS Verify
+
+# macOS 実環境に依存する挙動（hidutil の出力形式、シグナルによる復元、二重起動防止など）を検証する。
+# 環境（権限・HIDサービスの有無）によって結果が変わり得るため、Release の前提条件にはせず、手動実行専用にしている。
+# 権限不足などで検証できない項目は SKIP になり、ジョブの失敗にはならない。
+
+on:
+    workflow_dispatch:
+
+jobs:
+    verify:
+        runs-on: macos-latest
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v4
+
+            - name: Install Rust toolchain (aarch64-apple-darwin)
+              uses: dtolnay/rust-toolchain@stable
+              with:
+                  targets: aarch64-apple-darwin
+
+            - name: Build release binary
+              run: cargo build --release --target aarch64-apple-darwin
+
+            - name: Show environment
+              run: |
+                  sw_vers
+                  uname -m
+                  /usr/bin/hidutil property --get UserKeyMapping || true
+
+            - name: Verify macOS-specific behavior
+              run: bash scripts/verify-macos.sh target/aarch64-apple-darwin/release/m2us
