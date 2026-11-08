@@ -1,6 +1,7 @@
 pub mod hidmap;
 pub mod lock;
 pub mod state;
+pub mod text_input;
 
 #[cfg(target_os = "macos")]
 mod macos;

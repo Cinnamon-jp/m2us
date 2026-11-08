@@ -106,7 +106,7 @@ impl State {
                             }
                         } else if self == State::PendingLeftCmd && (flags & FLAG_MASK_COMMAND) == 0
                         {
-                            (State::Idle, Action::SendKey(KEY_JIS_EISU))
+                            (State::Idle, Action::SendImeKey(KEY_JIS_EISU))
                         } else {
                             (State::Idle, Action::None)
                         }
@@ -124,7 +124,7 @@ impl State {
                             }
                         } else if self == State::PendingRightCmd && (flags & FLAG_MASK_COMMAND) == 0
                         {
-                            (State::Idle, Action::SendKey(KEY_JIS_KANA))
+                            (State::Idle, Action::SendImeKey(KEY_JIS_KANA))
                         } else {
                             (State::Idle, Action::None)
                         }
@@ -155,7 +155,10 @@ pub enum InputEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     None,
-    SendKey(u16), // KEY_JIS_EISU, KEY_JIS_KANA, または KEY_ESCAPE
+    /// 常時発火するキー送出（KEY_ESCAPE）
+    SendKey(u16),
+    /// テキスト入力フォーカス時のみ発火するIME切替キー送出（KEY_JIS_EISU, KEY_JIS_KANA）
+    SendImeKey(u16),
     StartCapsTimer,
     CancelCapsTimer,
     ToggleCapsLock,
@@ -193,7 +196,7 @@ mod tests {
             flags: 0,
         });
         assert_eq!(s, State::Idle);
-        assert_eq!(act, Action::SendKey(KEY_JIS_EISU));
+        assert_eq!(act, Action::SendImeKey(KEY_JIS_EISU));
     }
 
     #[test]
@@ -215,7 +218,7 @@ mod tests {
             flags: 0,
         });
         assert_eq!(s, State::Idle);
-        assert_eq!(act, Action::SendKey(KEY_JIS_KANA));
+        assert_eq!(act, Action::SendImeKey(KEY_JIS_KANA));
     }
 
     #[test]
@@ -360,7 +363,7 @@ mod tests {
             flags: 0,
         });
         assert_eq!(s, State::Idle);
-        assert_eq!(act, Action::SendKey(KEY_JIS_EISU));
+        assert_eq!(act, Action::SendImeKey(KEY_JIS_EISU));
         state = s;
 
         // 右Commandタップ
@@ -376,7 +379,7 @@ mod tests {
             flags: 0,
         });
         assert_eq!(s, State::Idle);
-        assert_eq!(act, Action::SendKey(KEY_JIS_KANA));
+        assert_eq!(act, Action::SendImeKey(KEY_JIS_KANA));
     }
 
     #[test]
@@ -505,6 +508,6 @@ mod tests {
             flags: FLAG_MASK_ALPHA_SHIFT,
         });
         assert_eq!(s, State::Idle);
-        assert_eq!(act, Action::SendKey(KEY_JIS_EISU));
+        assert_eq!(act, Action::SendImeKey(KEY_JIS_EISU));
     }
 }
